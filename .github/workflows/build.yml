@@ -27,7 +27,7 @@ jobs:
         os: [ubuntu-latest, macos-latest,
 #             windows
         ]
-        arch: [x86_64, arm64]
+        arch: [x86_64]
         config: [release]
         py_version: ["3.10"]
         exclude:
