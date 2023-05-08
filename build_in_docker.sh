@@ -26,6 +26,7 @@ done
 docker run \
   --rm \
   --platform linux/amd64 \
+  -v "${HOME}/.ccache:/root/.ccache"
   -v $SOURCE_DIR:/work \
   -e SOURCE_DIR=/work \
   -e NUM_JOBS=$NUM_JOBS \
