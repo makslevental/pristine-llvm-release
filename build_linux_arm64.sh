@@ -33,7 +33,8 @@ sedinplace 's/if(CMAKE_CROSSCOMPILING)/if(0)/g' $SOURCE_DIR/llvm-project/llvm/to
 sedinplace 's/set(ENABLE_CHECK_TARGETS TRUE)//g' $SOURCE_DIR/llvm-project/openmp/cmake/OpenMPTesting.cmake
 sedinplace 's/construct_check_openmp_target()//g' $SOURCE_DIR/llvm-project/openmp/CMakeLists.txt
 
-sudo apt install -y clang
+sudo apt install -y clang ccache
+export PATH="/usr/lib/ccache:/usr/local/opt/ccache/libexec:$PATH"
 
 unset CMAKE_CONFIGS
 CMAKE_CONFIGS="\
