@@ -1,0 +1,148 @@
+name: Build
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    branches:
+      - main
+
+  schedule:
+    # At minute 0 past hour 1, 7, 13, and 19. (see https://crontab.guru)
+    - cron: '00 01,07,13,19 * * *'
+
+jobs:
+
+  build:
+    
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest,
+#             windows
+        ]
+        arch: [x86_64, arm64]
+        config: [release]
+        py_version: ["3.10"]
+#        exclude:
+#          - os: windows
+#            arch: arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ${{ matrix.py_version }}-${{ matrix.arch }}-${{ matrix.config }}-${{ matrix.os }}
+
+      - name: Checkout LLVM
+        run: |
+          git clone --depth 1 https://github.com/llvm/llvm-project
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.py_version }}
+
+      - name: Compile
+        run: |
+          python3 -m pip install pybind11==2.10.1 cmake==3.24.0 numpy PyYAML dataclasses -U --force
+          if [ x"${{ matrix.os }}" == x"ubuntu-latest" ]; then
+            sudo apt update && sudo apt install -y git build-essential wget clang
+          fi
+          export PATH="/usr/lib/ccache:/usr/local/opt/ccache/libexec:$PATH"
+          bash build_llvm.sh \
+            -v ${{ matrix.py_version }} \
+            -a ${{ matrix.arch }} \
+            -c ${{ matrix.config }} \
+            -j 4 \
+            -p ${{ matrix.os }}
+
+      - name: Tar and collect release
+        run: |
+          if [ x"${{ matrix.os }}" == x"ubuntu-latest" ]; then
+            PLATFORM_NAME="linux-gnu-ubuntu-22.04"
+          else
+            PLATFORM_NAME="apple-darwin"
+          fi
+          
+          FULL_LLVM_COMMIT="$(git ls-files -s llvm-project | cut -d' ' -f2)"
+          
+          OUTPUT="llvm+mlir+openmp+clang-${FULL_LLVM_COMMIT}-${{ matrix.arch }}-${PLATFORM_NAME}-${{ matrix.config }}"
+          XZ_OPT='-T0 -9' tar -cJf "${OUTPUT}.tar.xz" llvm_install
+          
+          mkdir -p ${{ github.sha }}/
+          mv *.tar.xz ${{ github.sha }}/
+
+      - name: Build MLIR Python bindings wheel
+        if: matrix.config == 'release'
+        run: |
+          if [ x"${{ matrix.os }}" == x"ubuntu-latest" ]; then
+            PLATFORM_NAME="manylinux2014"
+            R=r
+          else
+            PLATFORM_NAME="macosx_11_0"
+            R=R
+          fi
+          python -m pip install wheel
+          cp -L -$R llvm_install/python_packages/mlir_core/mlir .
+          
+          mkdir -p ${{ github.sha }}/
+          python setup.py bdist_wheel --plat-name "${PLATFORM_NAME}_${{ matrix.arch }}" --dist-dir ${{ github.sha }}
+
+#      - name: Build (Windows)
+#        if: ${{ matrix.os-arch == 'windows-x86_64' }}
+#        shell: bash
+#        run: ./build_tools/python_deploy/build_windows_ci.sh
+
+      - name: Upload an artifact
+        uses: actions/upload-artifact@v3
+        if: github.event_name == 'push'
+        with:
+          name: build_artifact
+          path: ${{ github.sha }}
+
+  upload-tarballs:
+
+    runs-on: ubuntu-latest
+
+    needs: [build]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v3
+        with:
+          name: build_artifact
+          path: ${{ github.sha }}
+
+      - name: Set up a release page
+        id: setup_release
+        run: |
+          FULL_LLVM_COMMIT="$(git ls-files -s llvm-project | cut -d' ' -f2)"
+          tag_name="${FULL_LLVM_COMMIT}"
+          echo "Created at $(date) build of [https://github.com/llvm/llvm-project/commit/${FULL_LLVM_COMMIT}](https://github.com/llvm/llvm-project/commit/${FULL_LLVM_COMMIT})" > body.md
+          echo "::set-output name=tag_name::${tag_name}"
+          echo "::set-output name=release_title::${tag_name}"
+
+      - name: Upload tarballs
+        uses: ncipollo/release-action@v1
+        with:
+          artifacts: "${{ github.sha }}/*.tar.xz,${{ github.sha }}/*.whl,${{ github.sha }}/*.exe"
+          bodyFile: body.md
+          token: "${{ secrets.GITHUB_TOKEN }}"
+          tag: "${{ steps.setup_release.outputs.tag_name }}"
+          name: "${{ steps.setup_release.outputs.release_title }}"
+          removeArtifacts: false
+          allowUpdates: true
+          replacesArtifacts: true
+
