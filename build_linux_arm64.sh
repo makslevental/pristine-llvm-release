@@ -70,7 +70,7 @@ CMAKE_CONFIGS="\
   -DLLVM_INSTALL_UTILS=ON \
   -DLLVM_HOST_TRIPLE=aarch64-linux-gnueabihf \
   -DLLVM_DEFAULT_TARGET_TRIPLE=aarch64-linux-gnueabihf \
-  -DLLVM_ENABLE_PROJECTS=llvm;mlir;openmp;clang;compiler-rt \
+  -DLLVM_ENABLE_PROJECTS=llvm;mlir;openmp;compiler-rt \
   \
   -DENABLE_CHECK_TARGETS=OFF \
   -DOPENMP_ENABLE_LIBOMPTARGET=OFF \

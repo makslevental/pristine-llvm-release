@@ -22,7 +22,7 @@ CMAKE_CONFIGS="\
   -DMLIR_ENABLE_EXECUTION_ENGINE=OFF \
   -DLLVM_BUILD_TOOLS=ON \
   -DLLVM_INCLUDE_TOOLS=ON \
-  -DLLVM_ENABLE_PROJECTS=mlir;clang \
+  -DLLVM_ENABLE_PROJECTS=mlir \
   -DLLVM_TARGET_ARCH=host \
   -DLLVM_TARGETS_TO_BUILD=host \
   "
@@ -37,6 +37,6 @@ fi
 
 CMAKE_CONFIGS="${CMAKE_CONFIGS} -DCMAKE_BUILD_TYPE=Release"
 cmake "$SOURCE_DIR/llvm-project/llvm" $CMAKE_CONFIGS
-make llvm-tblgen mlir-tblgen mlir-linalg-ods-yaml-gen mlir-pdll clang-tblgen -j $NUM_JOBS
+make llvm-tblgen mlir-tblgen mlir-linalg-ods-yaml-gen mlir-pdll -j $NUM_JOBS
 
 popd
