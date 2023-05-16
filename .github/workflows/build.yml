@@ -19,10 +19,12 @@ jobs:
   build:
     name: Build distro of LLVM+MLIR
     runs-on: ${{ matrix.os }}
+    continue-on-error: true
     strategy:
+      fail-fast: false
       matrix:
         os: [ ubuntu-latest, macos-latest ]
-        py_version: [ "3.10" ]
+        py_version: [ "3.10", "3.11" ]
     outputs:
       LLVM_PROJECT_COMMIT: ${{ steps.get_llvm_project_commit.outputs.LLVM_PROJECT_COMMIT }}
     steps:
@@ -37,6 +39,9 @@ jobs:
         with:
           python-version: ${{ matrix.py_version }}
 
+      - name: Checkout this repo
+        uses: actions/checkout@v3
+
       - name: Checkout llvm-project
         uses: actions/checkout@v3
         with:
@@ -47,10 +52,11 @@ jobs:
       - name: Get llvm-project commit
         id: get_llvm_project_commit
         run: |
-          cd $LLVM_PROJECT_MAIN_SRC_DIR
+          pushd $LLVM_PROJECT_MAIN_SRC_DIR
           LLVM_PROJECT_COMMIT=$(git rev-parse --short HEAD)
           echo "LLVM_PROJECT_COMMIT=${LLVM_PROJECT_COMMIT}" | tee -a $GITHUB_ENV
           echo "LLVM_PROJECT_COMMIT=${LLVM_PROJECT_COMMIT}" | tee -a $GITHUB_OUTPUT
+          popd
 
       - name: Install Python depends
         run: |
@@ -111,25 +117,35 @@ jobs:
       - name: Make tarballs
         run: |
           OUTPUT="llvm-project-${LLVM_PROJECT_COMMIT}-${{ matrix.os }}"
-          cd "$LLVM_PROJECT_INSTALL_DIR"/..
+          if [ x"${{ matrix.os }}" == x"ubuntu-latest" ]; then
+            R=r
+          else
+            R=R
+          fi
+          ls -lh
           XZ_OPT='-T0 -9' tar -cJf "${OUTPUT}.tar.xz" llvm_project_install
 
           mkdir -p ${{ github.sha }}/
           mv *.tar.xz ${{ github.sha }}/
 
       - name: Build MLIR Python bindings wheel
-#        if: matrix.config == 'release'
         run: |
+          python -m pip install wheel
+          
           if [ x"${{ matrix.os }}" == x"ubuntu-latest" ]; then
+            PLATFORM_NAME="manylinux2014"
+            ARCH=x86_64
             R=r
           else
+            PLATFORM_NAME="macosx_12_0"
+            ARCH=arm64
             R=R
           fi
           
           cp -L -$R llvm_project_install/python_packages/mlir_core/mlir .
-          pip install cibuildwheel
-          cibuildwheel
-          mv wheelhouse/mlir-python-bindings*.whl ${{ github.sha }}/
+          cp -L -$R llvm_project_install/lib/libmlir* mlir/_mlir_libs/
+          
+          python setup.py bdist_wheel --plat-name "${PLATFORM_NAME}_${ARCH}" --dist-dir ${{ github.sha }}
 
       - name: Upload an artifact
         uses: actions/upload-artifact@v3
