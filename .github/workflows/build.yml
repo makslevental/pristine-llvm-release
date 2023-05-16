@@ -16,72 +16,104 @@ on:
     - cron: '00 01,07,13,19 * * *'
 
 jobs:
-
   build:
-    
+    name: Build distro of TorchMLIR
     runs-on: ${{ matrix.os }}
-    continue-on-error: true
     strategy:
-      fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest,
-#             windows
-        ]
-        arch: [x86_64]
-        config: [release]
-        py_version: ["3.10"]
-        exclude:
-          - os: macos-latest
-            arch: arm64
+        os: [ ubuntu-latest, macos-latest ]
+        py_version: [ "3.10", "3.11" ]
     outputs:
-      llvm_commit: ${{ steps.checkout_llvm.outputs.FULL_LLVM_COMMIT }}
+      LLVM_PROJECT_COMMIT: ${{ steps.get_llvm_project_commit.outputs.LLVM_PROJECT_COMMIT }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-      - name: ccache
-        uses: hendrikmuhs/ccache-action@v1.2
-        with:
-          key: ${{ matrix.py_version }}-${{ matrix.arch }}-${{ matrix.config }}-${{ matrix.os }}
-          max-size: 6G
-          
-      - name: Checkout LLVM
-        id: checkout_llvm
+      - name: Compute llvm-project base path
         run: |
-          git clone --depth 1 https://github.com/llvm/llvm-project
-          FULL_LLVM_COMMIT="$(cd llvm-project && git rev-parse --short HEAD)"
-          echo "FULL_LLVM_COMMIT=${FULL_LLVM_COMMIT}" | tee -a $GITHUB_ENV
-          echo "{FULL_LLVM_COMMIT}=${FULL_LLVM_COMMIT}" | tee -a $GITHUB_OUTPUT
+          echo "LLVM_PROJECT_MAIN_SRC_DIR=${GITHUB_WORKSPACE}/sandbox" | tee -a $GITHUB_ENV
+          echo "LLVM_PROJECT_MAIN_BINARY_DIR=${GITHUB_WORKSPACE}/sandbox/build" | tee -a $GITHUB_ENV
+          echo "LLVM_PROJECT_INSTALL_DIR=${GITHUB_WORKSPACE}/llvm_project_install" | tee -a $GITHUB_ENV
 
-      - name: Setup Python
-        uses: actions/setup-python@v4
+      - name: Set up Python
+        uses: actions/setup-python@13ae5bb136fac2878aff31522b9efb785519f984 # v4.3.0
         with:
           python-version: ${{ matrix.py_version }}
 
-      - name: Compile
-        run: |
-          python3 -m pip install pybind11==2.10.1 cmake==3.24.0 numpy PyYAML dataclasses -U --force
-          if [ x"${{ matrix.os }}" == x"ubuntu-latest" ]; then
-            sudo apt update && sudo apt install -y git build-essential wget clang
-          fi
-          export PATH="/usr/lib/ccache:/usr/local/opt/ccache/libexec:$PATH"
-          bash build_llvm.sh \
-            -v ${{ matrix.py_version }} \
-            -a ${{ matrix.arch }} \
-            -c ${{ matrix.config }} \
-            -j 4 \
-            -p ${{ matrix.os }}
+      - name: Checkout llvm-project
+        uses: actions/checkout@v3
+        with:
+          repository: llvm/llvm-project
+          path: sandbox
+          submodules: recursive
 
-      - name: Tar and collect release
+      - name: Get llvm-project commit
+        id: get_llvm_project_commit
         run: |
-          if [ x"${{ matrix.os }}" == x"ubuntu-latest" ]; then
-            PLATFORM_NAME="linux-gnu-ubuntu-22.04"
+          cd $LLVM_PROJECT_MAIN_SRC_DIR
+          LLVM_PROJECT_COMMIT=$(git rev-parse --short HEAD)
+          echo "LLVM_PROJECT_COMMIT=${LLVM_PROJECT_COMMIT}" | tee -a $GITHUB_ENV
+          echo "LLVM_PROJECT_COMMIT=${LLVM_PROJECT_COMMIT}" | tee -a $GITHUB_OUTPUT
+
+      - name: Install Python depends
+        run: |
+          python -m pip install -r ${LLVM_PROJECT_MAIN_SRC_DIR}/mlir/python/requirements.txt
+
+      - name: Install Ninja
+        uses: llvm/actions/install-ninja@6a57890d0e3f9f35dfc72e7e48bc5e1e527cdd6c # Jan 17
+
+      - name: Ccache for C++ compilation
+        uses: hendrikmuhs/ccache-action@621a41397ed83711c72862638d9ff6e63fca3041 # v1.2.3
+        with:
+          key: ${{ runner.os }}-llvm-project
+          # LLVM needs serious cache size
+          max-size: 6G
+
+      - name: Configure CMake
+        run: |
+          CMAKE_CONFIGS="\
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_INSTALL_PREFIX=$LLVM_PROJECT_INSTALL_DIR \
+            -DLLVM_CCACHE_BUILD=ON \
+            -DLLVM_ENABLE_ASSERTIONS=ON \
+            -DCMAKE_LINKER=lld \
+            -DLLVM_ENABLE_PROJECTS=mlir \
+            -DLLVM_ENABLE_ZSTD=OFF \
+            -DLLVM_INCLUDE_UTILS=ON \
+            -DLLVM_INSTALL_UTILS=ON \
+            -DLLVM_USE_HOST_TOOLS=ON \
+            -DMLIR_BUILD_MLIR_C_DYLIB=1 \
+            -DMLIR_ENABLE_BINDINGS_PYTHON=ON \
+            -DMLIR_ENABLE_EXECUTION_ENGINE=ON \
+            -DPython3_EXECUTABLE=$(which python)"
+          
+          if [ x"${{ matrix.os }}" == x"macos-latest" ]; then
+            CMAKE_CONFIGS="${CMAKE_CONFIGS} \
+              -DCMAKE_OSX_ARCHITECTURES=arm64 \
+              -DLLVM_TARGET_ARCH=AArch64 \
+              -DLLVM_TARGETS_TO_BUILD=AArch64 \
+              -DMACOSX_DEPLOYMENT_TARGET=12.0"
           else
-            PLATFORM_NAME="apple-darwin"
+            CMAKE_CONFIGS="${CMAKE_CONFIGS} \
+              -DLLVM_TARGET_ARCH=X86 \
+              -DLLVM_TARGETS_TO_BUILD=X86"
           fi
           
-          OUTPUT="llvm+mlir+openmp-${FULL_LLVM_COMMIT}-${PLATFORM_NAME}-${{ matrix.arch }}-${{ matrix.config }}"
-          XZ_OPT='-T0 -9' tar -cJf "${OUTPUT}.tar.xz" llvm_install
-          
+          cmake -G Ninja \
+                $CMAKE_CONFIGS \
+                -S${LLVM_PROJECT_MAIN_SRC_DIR}/externals/llvm-project/llvm \
+                -B${LLVM_PROJECT_MAIN_BINARY_DIR}
+
+      - name: Build distro
+        run: |
+          cmake --build ${LLVM_PROJECT_MAIN_BINARY_DIR} --target install
+          ccache -s
+
+      - name: Make tarballs
+        run: |
+          OUTPUT="llvm-project-${LLVM_PROJECT_COMMIT}-${{ matrix.os }}"
+          cd "$LLVM_PROJECT_INSTALL_DIR"/..
+          XZ_OPT='-T0 -9' tar -cJf "${OUTPUT}.tar.xz" llvm_project_install
+
           mkdir -p ${{ github.sha }}/
           mv *.tar.xz ${{ github.sha }}/
 
@@ -89,27 +121,20 @@ jobs:
         if: matrix.config == 'release'
         run: |
           if [ x"${{ matrix.os }}" == x"ubuntu-latest" ]; then
-            PLATFORM_NAME="manylinux2014"
             R=r
           else
-            PLATFORM_NAME="macosx_11_0"
             R=R
           fi
-          python -m pip install wheel
-          cp -L -$R llvm_install/python_packages/mlir_core/mlir .
           
-          mkdir -p ${{ github.sha }}/
-          python setup.py bdist_wheel --plat-name "${PLATFORM_NAME}_${{ matrix.arch }}" --dist-dir ${{ github.sha }}
-
-#      - name: Build (Windows)
-#        if: ${{ matrix.os-arch == 'windows-x86_64' }}
-#        shell: bash
-#        run: ./build_tools/python_deploy/build_windows_ci.sh
+          cp -L -$R llvm_project_install/python_packages/mlir_core/mlir .
+          pip install cibuildwheel
+          cibuildwheel
+          mv wheelhouse/mlir-python-bindings*.whl ${{ github.sha }}/
 
       - name: Upload an artifact
         uses: actions/upload-artifact@v3
-        if: github.event_name == 'push'
         with:
+          if-no-files-found: error
           name: build_artifact
           path: ${{ github.sha }}
 
@@ -132,12 +157,12 @@ jobs:
       - name: Set up a release page
         id: setup_release
         run: |
-          tag_name="${{ needs.build.outputs.llvm_commit }}"
-          echo "Created at $(date) build of [https://github.com/llvm/llvm-project/commit/${FULL_LLVM_COMMIT}](https://github.com/llvm/llvm-project/commit/${FULL_LLVM_COMMIT})" > body.md
-          echo "{tag_name}=${tag_name}" | tee -a $GITHUB_OUTPUT
-          echo "{release_title}=${tag_name}" | tee -a $GITHUB_OUTPUT
+          LLVM_PROJECT_COMMIT="${{ needs.build.outputs.LLVM_PROJECT_COMMIT }}"
+          echo "Created at $(date) build of [https://github.com/llvm/llvm-project/commit/${LLVM_PROJECT_COMMIT}](https://github.com/llvm/llvm-project/commit/${LLVM_PROJECT_COMMIT})" > body.md
+          echo "tag_name=llvm-project-${LLVM_PROJECT_COMMIT}" | tee -a $GITHUB_OUTPUT
+          echo "release_title=llvm-project-${LLVM_PROJECT_COMMIT}" | tee -a $GITHUB_OUTPUT
 
-      - name: Upload tarballs
+      - name: Release current commit
         uses: ncipollo/release-action@v1
         with:
           artifacts: "${{ github.sha }}/*.tar.xz,${{ github.sha }}/*.whl,${{ github.sha }}/*.exe"
@@ -148,4 +173,3 @@ jobs:
           removeArtifacts: false
           allowUpdates: true
           replacesArtifacts: true
-
