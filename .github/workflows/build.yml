@@ -118,7 +118,7 @@ jobs:
           mv *.tar.xz ${{ github.sha }}/
 
       - name: Build MLIR Python bindings wheel
-        if: matrix.config == 'release'
+#        if: matrix.config == 'release'
         run: |
           if [ x"${{ matrix.os }}" == x"ubuntu-latest" ]; then
             R=r
