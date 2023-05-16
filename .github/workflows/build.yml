@@ -17,7 +17,7 @@ on:
 
 jobs:
   build:
-    name: Build distro of TorchMLIR
+    name: Build distro of LLVM+MLIR
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -100,7 +100,7 @@ jobs:
           
           cmake -G Ninja \
                 $CMAKE_CONFIGS \
-                -S${LLVM_PROJECT_MAIN_SRC_DIR}/externals/llvm-project/llvm \
+                -S${LLVM_PROJECT_MAIN_SRC_DIR}/llvm \
                 -B${LLVM_PROJECT_MAIN_BINARY_DIR}
 
       - name: Build distro
