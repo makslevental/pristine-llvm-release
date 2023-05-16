@@ -16,7 +16,24 @@ on:
     - cron: '00 01,07,13,19 * * *'
 
 jobs:
+
+  get_llvm_project_commit:
+    name: Get latest LLVM commit
+    runs-on: ubuntu-latest
+    outputs:
+      LLVM_PROJECT_COMMIT: ${{ steps.get_llvm_project_commit.outputs.LLVM_PROJECT_COMMIT }}
+    steps:
+      - name: Get llvm-project commit
+        id: get_llvm_project_commit
+        run: |
+          sudo apt install jq
+          LLVM_PROJECT_COMMIT=$(curl -s https://api.github.com/repos/llvm/llvm-project/commits/main | jq -r '.sha')
+          echo "LLVM_PROJECT_COMMIT=${LLVM_PROJECT_COMMIT}" | tee -a $GITHUB_OUTPUT
+
   build:
+
+    needs: get_llvm_project_commit
+
     name: Build distro of LLVM+MLIR
     runs-on: ${{ matrix.os }}
     continue-on-error: true
@@ -26,14 +43,9 @@ jobs:
         os: [ ubuntu-latest, macos-latest ]
         py_version: [ "3.10", "3.11" ]
     outputs:
-      LLVM_PROJECT_COMMIT: ${{ steps.get_llvm_project_commit.outputs.LLVM_PROJECT_COMMIT }}
-    steps:
-      - name: Compute llvm-project base path
-        run: |
-          echo "LLVM_PROJECT_MAIN_SRC_DIR=${GITHUB_WORKSPACE}/sandbox" | tee -a $GITHUB_ENV
-          echo "LLVM_PROJECT_MAIN_BINARY_DIR=${GITHUB_WORKSPACE}/sandbox/build" | tee -a $GITHUB_ENV
-          echo "LLVM_PROJECT_INSTALL_DIR=${GITHUB_WORKSPACE}/llvm_project_install" | tee -a $GITHUB_ENV
+      LLVM_PROJECT_COMMIT: ${{ needs.get_llvm_project_commit.outputs.LLVM_PROJECT_COMMIT }}
 
+    steps:
       - name: Set up Python
         uses: actions/setup-python@13ae5bb136fac2878aff31522b9efb785519f984 # v4.3.0
         with:
@@ -46,17 +58,15 @@ jobs:
         uses: actions/checkout@v3
         with:
           repository: llvm/llvm-project
+          ref: ${{ needs.get_latest_llvm_commit.outputs.LLVM_PROJECT_COMMIT }}
           path: sandbox
-          submodules: recursive
 
-      - name: Get llvm-project commit
-        id: get_llvm_project_commit
+      - name: Compute llvm-project base path and output commit
         run: |
-          pushd $LLVM_PROJECT_MAIN_SRC_DIR
-          LLVM_PROJECT_COMMIT=$(git rev-parse --short HEAD)
-          echo "LLVM_PROJECT_COMMIT=${LLVM_PROJECT_COMMIT}" | tee -a $GITHUB_ENV
-          echo "LLVM_PROJECT_COMMIT=${LLVM_PROJECT_COMMIT}" | tee -a $GITHUB_OUTPUT
-          popd
+          echo "LLVM_PROJECT_MAIN_SRC_DIR=${GITHUB_WORKSPACE}/sandbox" | tee -a $GITHUB_ENV
+          echo "LLVM_PROJECT_MAIN_BINARY_DIR=${GITHUB_WORKSPACE}/sandbox/build" | tee -a $GITHUB_ENV
+          echo "LLVM_PROJECT_INSTALL_DIR=${GITHUB_WORKSPACE}/llvm_project_install" | tee -a $GITHUB_ENV
+          echo "LLVM_PROJECT_COMMIT=${{ needs.get_llvm_project_commit.outputs.LLVM_PROJECT_COMMIT }}" | tee -a $GITHUB_ENV
 
       - name: Install Python depends
         run: |
