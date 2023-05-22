@@ -261,5 +261,6 @@ jobs:
           tag: "${{ steps.setup_release.outputs.tag_name }}"
           name: "${{ steps.setup_release.outputs.release_title }}"
           removeArtifacts: false
+          makeLatest: true
           allowUpdates: true
           replacesArtifacts: true
