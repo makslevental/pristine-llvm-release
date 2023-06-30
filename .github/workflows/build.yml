@@ -1,15 +1,28 @@
 name: Build
 
 on:
-  pull_request:
-    branches:
-      - main
-  push:
-    branches:
-      - main
   workflow_dispatch:
-    branches:
-      - main
+    inputs:
+      debug_enabled:
+        description: 'Run the build with tmate debugging enabled (https://github.com/marketplace/actions/debugging-with-tmate)'
+        type: boolean
+        required: false
+        default: false
+      debug_os:
+        description: 'which runner os to run the tmate action in (if the tmate action is run)'
+        type: string
+        default: 'windows-2019'
+        required: false
+      debug_detached:
+        description: 'whether to launch tmate in detached mode (if the tmate action is run)'
+        type: boolean
+        required: false
+        default: true
+      llvm_commit:
+        description: 'llvm commit to build'
+        type: string
+        required: false
+        default: 'f733b4fb9b8bf6c759262424dd9534fd2e51a56d'
 
   schedule:
     # At minute 0 past hour 1, 7, 13, and 19. (see https://crontab.guru)
@@ -26,8 +39,12 @@ jobs:
       - name: Get llvm-project commit
         id: get_llvm_project_commit
         run: |
-          sudo apt install jq
-          LLVM_PROJECT_COMMIT=$(curl -s https://api.github.com/repos/llvm/llvm-project/commits/main | jq -r '.sha[:8]')
+          if [ x"${{ inputs.llvm_commit }}" == x"" ]; then
+            sudo apt install jq
+            LLVM_PROJECT_COMMIT=$(curl -s https://api.github.com/repos/llvm/llvm-project/commits/main | jq -r '.sha[:8]')
+          else
+            LLVM_PROJECT_COMMIT="${{ inputs.llvm_commit }}"
+          fi
           echo "LLVM_PROJECT_COMMIT=${LLVM_PROJECT_COMMIT}" | tee -a $GITHUB_OUTPUT
 
   build:
@@ -35,17 +52,20 @@ jobs:
     needs: get_llvm_project_commit
 
     name: Build distro of LLVM+MLIR
+    #    runs-on: ${{ (matrix.os == 'windows-2019' && 'self-hosted') || matrix.os }}
     runs-on: ${{ matrix.os }}
     continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
-        os: [ ubuntu-latest, macos-latest ]
+        os: [ ubuntu-20.04, macos-latest, windows-2019 ]
         arch: [ AArch64, X86 ]
         py_version: [ "3.11" ]
         exclude:
           - os: macos-latest
             arch: X86
+          - os: windows-2019
+            arch: AArch64
     outputs:
       LLVM_PROJECT_COMMIT: ${{ needs.get_llvm_project_commit.outputs.LLVM_PROJECT_COMMIT }}
 
@@ -55,25 +75,60 @@ jobs:
         with:
           python-version: ${{ matrix.py_version }}
 
-      - name: Checkout this repo
-        uses: actions/checkout@v3
+      - uses: ilammy/msvc-dev-cmd@v1.4.1
+
+# chocolatey vswhere
+# choco install powershell-core -> add pwsh.exe to path
+# choco install git and add bash.exe to path
+
+      - name: Set up Visual Studio shell
+        if: ${{ matrix.os == 'windows-2019' }}
+        uses: egor-tensin/vs-shell@v2
+        with:
+          arch: x64
+
+      - name: MS Build
+        if: ${{ matrix.os == 'windows-2019' }}
+        uses: microsoft/setup-msbuild@v1.1
+
+      # Enable tmate debugging of manually-triggered workflows if the input option was provided
+      - name: Setup tmate session
+        uses: mxschmitt/action-tmate@v3
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.debug_enabled && inputs.debug_os == matrix.os }}
+        with:
+          limit-access-to-actor: true
+          detached: ${{ inputs.debug_detached }}
+
+      - name: Set workspace root
+        shell: bash
+        run: |
+          if [ x"${{ matrix.os }}" == x"windows-2019" ]; then
+            mkdir -p /C/a
+            echo "WORKSPACE_ROOT=/C/a" | tee -a $GITHUB_ENV
+          else
+            echo "WORKSPACE_ROOT=${GITHUB_WORKSPACE}" | tee -a $GITHUB_ENV
+          fi
 
       - name: Checkout llvm-project
-        uses: actions/checkout@v3
-        with:
-          repository: llvm/llvm-project
-          ref: ${{ needs.get_latest_llvm_commit.outputs.LLVM_PROJECT_COMMIT }}
-          path: sandbox
+        shell: bash
+        run: |
+          cd $WORKSPACE_ROOT
+          if [ ! -d "llvm-project" ]; then
+            git clone https://github.com/llvm/llvm-project.git
+          fi 
+          cd llvm-project && git reset --hard ${{ inputs.llvm_commit }}
 
       - name: Compute llvm-project base path and output commit
+        shell: bash
         run: |
-          echo "LLVM_PROJECT_MAIN_SRC_DIR=${GITHUB_WORKSPACE}/sandbox" | tee -a $GITHUB_ENV
-          echo "LLVM_PROJECT_MAIN_BINARY_DIR=${GITHUB_WORKSPACE}/sandbox/build" | tee -a $GITHUB_ENV
-          echo "LLVM_PROJECT_INSTALL_DIR=${GITHUB_WORKSPACE}/llvm_project_install" | tee -a $GITHUB_ENV
-          echo "LLVM_PROJECT_HOST_MAIN_BINARY_DIR=${GITHUB_WORKSPACE}/sandbox/build_host" | tee -a $GITHUB_ENV
-          echo "LLVM_PROJECT_COMMIT=${{ needs.get_llvm_project_commit.outputs.LLVM_PROJECT_COMMIT }}" | tee -a $GITHUB_ENV
+          echo "LLVM_PROJECT_MAIN_SRC_DIR=${WORKSPACE_ROOT}/llvm-project" | tee -a $GITHUB_ENV
+          echo "LLVM_PROJECT_MAIN_BINARY_DIR=${WORKSPACE_ROOT}/build" | tee -a $GITHUB_ENV
+          echo "LLVM_PROJECT_INSTALL_DIR=${WORKSPACE_ROOT}/llvm_project_install" | tee -a $GITHUB_ENV
+          echo "LLVM_PROJECT_HOST_MAIN_BINARY_DIR=${WORKSPACE_ROOT}/build_host" | tee -a $GITHUB_ENV
+          echo "LLVM_PROJECT_COMMIT=${{ inputs.llvm_commit }}" | tee -a $GITHUB_ENV
 
       - name: Install Python depends
+        shell: bash
         run: |
           python -m pip install -r ${LLVM_PROJECT_MAIN_SRC_DIR}/mlir/python/requirements.txt
 
@@ -88,21 +143,65 @@ jobs:
           max-size: 6G
 
       - name: Install cross-compilation toolchain
-        if: contains(matrix.os, 'ubuntu') && contains(matrix.arch, 'AArch64')
+        if: ${{ matrix.os == 'ubuntu-20.04' && matrix.arch == 'AArch64' }}
         run: |
           sudo apt-get update
           sudo apt-get install -y binutils-aarch64-linux-gnu \
             g++-aarch64-linux-gnu gcc-aarch64-linux-gnu
 
-      - name: Build host llvmtblgen/mlirtblgen
-        if: contains(matrix.os, 'ubuntu') && contains(matrix.arch, 'AArch64')
+      - name: Choose compiler and set env vars
+        shell: bash
         run: |
+          if [ x"${{ matrix.os }}" == x"macos-latest" ]; then
+            echo "ARCH=AArch64" | tee -a $GITHUB_ENV
+            echo "CXX_COMPILER=clang++" | tee -a $GITHUB_ENV
+            echo "C_COMPILER=clang" | tee -a $GITHUB_ENV
+            echo "LLVM_DEFAULT_TARGET_TRIPLE=arm64-apple-darwin21.6.0" | tee -a $GITHUB_ENV
+            echo "LLVM_HOST_TRIPLE=arm64-apple-darwin21.6.0" | tee -a $GITHUB_ENV
+            echo "GENERATOR=Ninja" | tee -a $GITHUB_ENV
+          elif [ x"${{ matrix.os }}" == x"windows-2019" ]; then
+            echo "ARCH=X86" | tee -a $GITHUB_ENV
+            echo "CXX_COMPILER=cl" | tee -a $GITHUB_ENV
+            echo "C_COMPILER=cl" | tee -a $GITHUB_ENV
+            echo "LLVM_DEFAULT_TARGET_TRIPLE=x86_64-window-x86-gnu" | tee -a $GITHUB_ENV
+            echo "LLVM_HOST_TRIPLE=x86_64-window-x86-gnu" | tee -a $GITHUB_ENV
+            echo "STATIC_FLAGS=" | tee -a $GITHUB_ENV
+            echo "GENERATOR=Ninja" | tee -a $GITHUB_ENV
+            echo "EXTRA=-A x64" | tee -a $GITHUB_ENV
+          elif [ x"${{ matrix.os }}" == x"ubuntu-20.04" ] && [ x"${{ matrix.arch }}" == x"AArch64" ]; then
+            echo "ARCH=AArch64" | tee -a $GITHUB_ENV
+            echo "CXX_COMPILER=aarch64-linux-gnu-g++" | tee -a $GITHUB_ENV
+            echo "C_COMPILER=aarch64-linux-gnu-gcc" | tee -a $GITHUB_ENV
+            echo "LLVM_DEFAULT_TARGET_TRIPLE=aarch64-linux-gnu" | tee -a $GITHUB_ENV
+            echo "LLVM_HOST_TRIPLE=aarch64-linux-gnu" | tee -a $GITHUB_ENV
+            echo "STATIC_FLAGS=-static-libgcc -static-libstdc++" | tee -a $GITHUB_ENV
+            echo "GENERATOR=Ninja" | tee -a $GITHUB_ENV
+          else
+            echo "ARCH=X86" | tee -a $GITHUB_ENV
+            echo "CXX_COMPILER=g++" | tee -a $GITHUB_ENV
+            echo "C_COMPILER=gcc" | tee -a $GITHUB_ENV
+            echo "LLVM_DEFAULT_TARGET_TRIPLE=x86_64-unknown-linux-gnu" | tee -a $GITHUB_ENV
+            echo "LLVM_HOST_TRIPLE=x86_64-unknown-linux-gnu" | tee -a $GITHUB_ENV
+            echo "STATIC_FLAGS=-static-libgcc -static-libstdc++" | tee -a $GITHUB_ENV
+            echo "GENERATOR=Ninja" | tee -a $GITHUB_ENV
+          fi
+
+      - name: Build host llvmtblgen/mlirtblgen
+        if: ${{ matrix.arch == 'AArch64' }}
+        shell: bash
+        run: |
+          cd $WORKSPACE_ROOT
+          if [ x"${{ matrix.os }}" == x"ubuntu-20.04" ]; then
+            export CXX_COMPILER=g++
+            export C_COMPILER=gcc
+          fi
           cmake \
+            -G "$GENERATOR" \
             -DBUILD_SHARED_LIBS=OFF \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_CXX_COMPILER=g++ \
-            -DCMAKE_CXX_FLAGS="-O2 -static-libgcc -static-libstdc++" \
-            -DCMAKE_C_COMPILER=gcc \
+            -DCMAKE_CXX_COMPILER=$CXX_COMPILER \
+            -DCMAKE_CXX_FLAGS="-O2 ${STATIC_FLAGS}" \
+            -DCMAKE_C_COMPILER=$C_COMPILER \
             -DLLVM_ENABLE_PROJECTS=mlir \
             -DLLVM_ENABLE_TERMINFO=OFF \
             -DLLVM_ENABLE_ZLIB=OFF \
@@ -112,32 +211,12 @@ jobs:
             -B${LLVM_PROJECT_HOST_MAIN_BINARY_DIR}
           
           cmake --build ${LLVM_PROJECT_HOST_MAIN_BINARY_DIR} \
-            --target llvm-tblgen mlir-tblgen mlir-linalg-ods-yaml-gen mlir-pdll
-
-      - name: Choose compiler and set env vars
-        run: |
-          if [ x"${{ matrix.os }}" == x"macos-latest" ]; then
-            echo "CXX_COMPILER=clang++" | tee -a $GITHUB_ENV
-            echo "C_COMPILER=clang" | tee -a $GITHUB_ENV
-            echo "LLVM_DEFAULT_TARGET_TRIPLE=arm64-apple-darwin21.6.0" | tee -a $GITHUB_ENV
-            echo "LLVM_HOST_TRIPLE=arm64-apple-darwin21.6.0" | tee -a $GITHUB_ENV
-            echo "ARCH=AArch64" | tee -a $GITHUB_ENV
-          elif [ x"${{ matrix.os }}" == x"ubuntu-latest" ] && [ x"${{ matrix.arch }}" == x"AArch64" ]; then
-            echo "CXX_COMPILER=aarch64-linux-gnu-g++" | tee -a $GITHUB_ENV
-            echo "C_COMPILER=aarch64-linux-gnu-gcc" | tee -a $GITHUB_ENV
-            echo "LLVM_DEFAULT_TARGET_TRIPLE=aarch64-linux-gnu" | tee -a $GITHUB_ENV
-            echo "LLVM_HOST_TRIPLE=aarch64-linux-gnu" | tee -a $GITHUB_ENV
-            echo "ARCH=AArch64" | tee -a $GITHUB_ENV
-          else
-            echo "CXX_COMPILER=g++" | tee -a $GITHUB_ENV
-            echo "C_COMPILER=gcc" | tee -a $GITHUB_ENV
-            echo "LLVM_DEFAULT_TARGET_TRIPLE=x86_64-unknown-linux-gnu" | tee -a $GITHUB_ENV
-            echo "LLVM_HOST_TRIPLE=x86_64-unknown-linux-gnu" | tee -a $GITHUB_ENV
-            echo "ARCH=X86" | tee -a $GITHUB_ENV
-          fi
+            --target llvm-tblgen mlir-tblgen mlir-linalg-ods-yaml-gen mlir-pdll -j 20
 
       - name: Configure CMake
+        shell: bash
         run: |
+          cd $WORKSPACE_ROOT
           CMAKE_CONFIGS="\
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CXX_COMPILER=$CXX_COMPILER \
@@ -153,73 +232,113 @@ jobs:
             -DLLVM_INSTALL_UTILS=ON \
             -DLLVM_TARGETS_TO_BUILD=$ARCH \
             -DLLVM_TARGET_ARCH=$ARCH \
-            -DLLVM_USE_HOST_TOOLS=ON \
             -DMLIR_BUILD_MLIR_C_DYLIB=1 \
             -DMLIR_ENABLE_BINDINGS_PYTHON=ON \
             -DMLIR_ENABLE_EXECUTION_ENGINE=ON \
             -DPython3_EXECUTABLE=$(which python)"
           
-          if [ x"${{ matrix.os }}" == x"macos-latest" ]; then
-            CMAKE_CONFIGS="${CMAKE_CONFIGS} \
-              -DCMAKE_OSX_ARCHITECTURES=arm64 \
-              -DMACOSX_DEPLOYMENT_TARGET=12.0"
-          elif [ x"${{ matrix.os }}" == x"ubuntu-latest" ] && [ x"${{ matrix.arch }}" == x"AArch64" ]; then
-            CMAKE_CONFIGS="${CMAKE_CONFIGS} \
-              -DLLVM_TABLEGEN=$LLVM_PROJECT_HOST_MAIN_BINARY_DIR/bin/llvm-tblgen \
-              -DMLIR_LINALG_ODS_YAML_GEN=$LLVM_PROJECT_HOST_MAIN_BINARY_DIR/bin/mlir-linalg-ods-yaml-gen \
-              -DMLIR_LINALG_ODS_YAML_GEN_EXE=$LLVM_PROJECT_HOST_MAIN_BINARY_DIR/bin/mlir-linalg-ods-yaml-gen \
-              -DMLIR_PDLL_TABLEGEN=$LLVM_PROJECT_HOST_MAIN_BINARY_DIR/bin/mlir-pdll \
-              -DMLIR_TABLEGEN=$LLVM_PROJECT_HOST_MAIN_BINARY_DIR/bin/mlir-tblgen"
-          fi
-          
           echo $CMAKE_CONFIGS
-          if [ x"${{ matrix.os }}" == x"ubuntu-latest" ] && [ x"${{ matrix.arch }}" == x"AArch64" ]; then
-            cmake -G Ninja \
-                $CMAKE_CONFIGS \
-                -DCMAKE_CXX_FLAGS="-O2 -static-libgcc -static-libstdc++" \
+          
+          if [ x"${{ matrix.os }}" == x"macos-latest" ]; then
+          
+            cmake ${CMAKE_CONFIGS} \
+              -G "$GENERATOR" \
+              -DLLVM_USE_HOST_TOOLS=ON \
+              -DCMAKE_OSX_ARCHITECTURES=arm64 \
+              -DMACOSX_DEPLOYMENT_TARGET=12.0 \
+              -S${LLVM_PROJECT_MAIN_SRC_DIR}/llvm \
+              -B${LLVM_PROJECT_MAIN_BINARY_DIR}
+          
+          elif [ x"${{ matrix.os }}" == x"ubuntu-20.04" ] && [ x"${{ matrix.arch }}" == x"AArch64" ]; then
+          
+            cmake $CMAKE_CONFIGS \
+                -G "$GENERATOR" \
+                -DLLVM_USE_HOST_TOOLS=ON \
+                -DLLVM_TABLEGEN=$LLVM_PROJECT_HOST_MAIN_BINARY_DIR/bin/llvm-tblgen \
+                -DMLIR_LINALG_ODS_YAML_GEN=$LLVM_PROJECT_HOST_MAIN_BINARY_DIR/bin/mlir-linalg-ods-yaml-gen \
+                -DMLIR_LINALG_ODS_YAML_GEN_EXE=$LLVM_PROJECT_HOST_MAIN_BINARY_DIR/bin/mlir-linalg-ods-yaml-gen \
+                -DMLIR_PDLL_TABLEGEN=$LLVM_PROJECT_HOST_MAIN_BINARY_DIR/bin/mlir-pdll \
+                -DMLIR_TABLEGEN=$LLVM_PROJECT_HOST_MAIN_BINARY_DIR/bin/mlir-tblgen \
+                -DCMAKE_CXX_FLAGS="-O2 ${STATIC_FLAGS}" \
                 -S${LLVM_PROJECT_MAIN_SRC_DIR}/llvm \
                 -B${LLVM_PROJECT_MAIN_BINARY_DIR}
+          
+          elif [ x"${{ matrix.os }}" == x"windows-2019" ]; then
+          
+            cmake $CMAKE_CONFIGS \
+                -G "$GENERATOR" \
+                -DCMAKE_C_FLAGS="-D_SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING" \
+                -DCMAKE_CXX_FLAGS="-D_SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING" \
+                -DLLVM_USE_CRT_MINSIZEREL=MT \
+                -DLLVM_USE_CRT_RELEASE=MT \
+                -S${LLVM_PROJECT_MAIN_SRC_DIR}/llvm \
+                -B${LLVM_PROJECT_MAIN_BINARY_DIR}
+          
           else
-            cmake -G Ninja \
-                  $CMAKE_CONFIGS \
+          
+            cmake $CMAKE_CONFIGS \
+                  -G "$GENERATOR" \
+                  -DLLVM_USE_HOST_TOOLS=ON \
                   -S${LLVM_PROJECT_MAIN_SRC_DIR}/llvm \
                   -B${LLVM_PROJECT_MAIN_BINARY_DIR}
+          
           fi
 
       - name: Build distro
+        shell: bash
         run: |
-          cmake --build ${LLVM_PROJECT_MAIN_BINARY_DIR} --target install
+          cd $WORKSPACE_ROOT
+          cmake --build ${LLVM_PROJECT_MAIN_BINARY_DIR} --target install -j
           ccache -s
 
       - name: Make tarballs
+        shell: bash
         run: |
+          cd $WORKSPACE_ROOT
+          
+          if [ x"${{ matrix.arch }}" == x"AArch64" ]; then
+            mkdir -p $LLVM_PROJECT_INSTALL_DIR/llvm_native_tools
+            cp -L $LLVM_PROJECT_HOST_MAIN_BINARY_DIR/bin/mlir-linalg-ods-yaml-gen* $LLVM_PROJECT_INSTALL_DIR/llvm_native_tools/mlir-linalg-ods-yaml-gen
+            cp -L $LLVM_PROJECT_HOST_MAIN_BINARY_DIR/bin/mlir-pdll* $LLVM_PROJECT_INSTALL_DIR/llvm_native_tools/mlir-pdll
+            cp -L $LLVM_PROJECT_HOST_MAIN_BINARY_DIR/bin/mlir-tblgen* $LLVM_PROJECT_INSTALL_DIR/llvm_native_tools/mlir-tblgen
+            cp -L $LLVM_PROJECT_HOST_MAIN_BINARY_DIR/bin/llvm-tblgen* $LLVM_PROJECT_INSTALL_DIR/llvm_native_tools/llvm-tblgen
+          fi
+          
           OUTPUT="llvm-project-${LLVM_PROJECT_COMMIT}-${{ matrix.os }}-${{ matrix.arch }}"
           XZ_OPT='-T0 -9' tar -cJf "${OUTPUT}.tar.xz" llvm_project_install
 
-          mkdir -p ${{ github.sha }}/
-          mv *.tar.xz ${{ github.sha }}/
+          mkdir -p $GITHUB_WORKSPACE/${{ github.sha }}/
+          mv *.tar.xz $GITHUB_WORKSPACE/${{ github.sha }}/
+
+      - name: Checkout this repo
+        uses: actions/checkout@v3
+        with:
+          path: this_repo
 
       - name: Build MLIR Python bindings wheel
+        shell: bash
         run: |
+          cd $GITHUB_WORKSPACE/this_repo
+          
           python -m pip install wheel
           if [ x"${{ matrix.os }}" == x"macos-latest" ]; then
             PLATFORM_NAME="macosx_12_0"
             ARCH=arm64
-            R=R
-          elif [ x"${{ matrix.os }}" == x"ubuntu-latest" ] && [ x"${{ matrix.arch }}" == x"AArch64" ]; then
+          elif [ x"${{ matrix.os }}" == x"windows-2019" ]; then
+            PLATFORM_NAME="win"
+            ARCH=amd64
+          elif [ x"${{ matrix.os }}" == x"ubuntu-20.04" ] && [ x"${{ matrix.arch }}" == x"AArch64" ]; then
             PLATFORM_NAME="manylinux2014"
             ARCH=aarch64
-            R=r
           else
             PLATFORM_NAME="manylinux2014"
             ARCH=x86_64
-            R=r
           fi
           
-          cp -L -$R llvm_project_install/python_packages/mlir_core/mlir .
-          cp -L -$R llvm_project_install/lib/libmlir* mlir/_mlir_libs/
+          cp -L -R $LLVM_PROJECT_INSTALL_DIR/python_packages/mlir_core/mlir .
+          cp -L -R $LLVM_PROJECT_INSTALL_DIR/lib/*mlir* mlir/_mlir_libs/
           
-          python setup.py bdist_wheel --plat-name "${PLATFORM_NAME}_${ARCH}" --dist-dir ${{ github.sha }}
+          python setup.py bdist_wheel --plat-name "${PLATFORM_NAME}_${ARCH}" --dist-dir $GITHUB_WORKSPACE/${{ github.sha }}
 
       - name: Upload an artifact
         uses: actions/upload-artifact@v3
@@ -230,7 +349,7 @@ jobs:
 
   upload-tarballs:
 
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
 
     needs: build
 
