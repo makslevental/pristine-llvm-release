@@ -62,8 +62,6 @@ jobs:
         arch: [ AArch64, X86 ]
         py_version: [ "3.11" ]
         exclude:
-          - os: macos-latest
-            arch: X86
           - os: windows-2019
             arch: AArch64
     outputs:
@@ -152,13 +150,22 @@ jobs:
       - name: Choose compiler and set env vars
         shell: bash
         run: |
-          if [ x"${{ matrix.os }}" == x"macos-latest" ]; then
+          if [ x"${{ matrix.os }}" == x"macos-latest" ] && [ x"${{ matrix.arch }}" == x"AArch64" ]; then
             echo "ARCH=AArch64" | tee -a $GITHUB_ENV
             echo "CXX_COMPILER=clang++" | tee -a $GITHUB_ENV
             echo "C_COMPILER=clang" | tee -a $GITHUB_ENV
             echo "LLVM_DEFAULT_TARGET_TRIPLE=arm64-apple-darwin21.6.0" | tee -a $GITHUB_ENV
             echo "LLVM_HOST_TRIPLE=arm64-apple-darwin21.6.0" | tee -a $GITHUB_ENV
             echo "GENERATOR=Ninja" | tee -a $GITHUB_ENV
+            echo "CMAKE_OSX_ARCHITECTURE=arm64" | tee -a $GITHUB_ENV
+          elif [ x"${{ matrix.os }}" == x"macos-latest" ] && [ x"${{ matrix.arch }}" == x"X86" ]; then
+            echo "ARCH=X86" | tee -a $GITHUB_ENV
+            echo "CXX_COMPILER=clang++" | tee -a $GITHUB_ENV
+            echo "C_COMPILER=clang" | tee -a $GITHUB_ENV
+            echo "LLVM_DEFAULT_TARGET_TRIPLE=x86_64-apple-darwin" | tee -a $GITHUB_ENV
+            echo "LLVM_HOST_TRIPLE=x86_64-apple-darwin" | tee -a $GITHUB_ENV
+            echo "GENERATOR=Ninja" | tee -a $GITHUB_ENV
+            echo "CMAKE_OSX_ARCHITECTURE=x86_64" | tee -a $GITHUB_ENV
           elif [ x"${{ matrix.os }}" == x"windows-2019" ]; then
             echo "ARCH=X86" | tee -a $GITHUB_ENV
             echo "CXX_COMPILER=cl" | tee -a $GITHUB_ENV
@@ -244,7 +251,7 @@ jobs:
             cmake ${CMAKE_CONFIGS} \
               -G "$GENERATOR" \
               -DLLVM_USE_HOST_TOOLS=ON \
-              -DCMAKE_OSX_ARCHITECTURES=arm64 \
+              -DCMAKE_OSX_ARCHITECTURES="$CMAKE_OSX_ARCHITECTURE" \
               -DMACOSX_DEPLOYMENT_TARGET=12.0 \
               -S${LLVM_PROJECT_MAIN_SRC_DIR}/llvm \
               -B${LLVM_PROJECT_MAIN_BINARY_DIR}
@@ -323,7 +330,7 @@ jobs:
           python -m pip install wheel
           if [ x"${{ matrix.os }}" == x"macos-latest" ]; then
             PLATFORM_NAME="macosx_12_0"
-            ARCH=arm64
+            ARCH=$CMAKE_OSX_ARCHITECTURE
           elif [ x"${{ matrix.os }}" == x"windows-2019" ]; then
             PLATFORM_NAME="win"
             ARCH=amd64
