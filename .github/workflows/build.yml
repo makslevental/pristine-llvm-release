@@ -1,4 +1,4 @@
-name: Build
+name: Build MLIR
 
 on:
   workflow_dispatch:
@@ -51,7 +51,7 @@ jobs:
 
     needs: get_llvm_project_commit
 
-    name: Build distro of LLVM+MLIR
+    name: Build distro of MLIR
     #    runs-on: ${{ (matrix.os == 'windows-2019' && 'self-hosted') || matrix.os }}
     runs-on: ${{ matrix.os }}
     continue-on-error: true
@@ -61,9 +61,28 @@ jobs:
         os: [ ubuntu-20.04, macos-latest, windows-2019 ]
         arch: [ AArch64, X86 ]
         py_version: [ "3.11" ]
+        cuda: [ true, false ]
+        vulkan: [ true, false ]
         exclude:
           - os: windows-2019
             arch: AArch64
+          - os: windows-2019
+            cuda: true
+          - os: windows-2019
+            vulkan: true
+          - os: macos-latest
+            cuda: true
+          - os: ubuntu-20.04
+            arch: AArch64
+            cuda: true
+          - os: ubuntu-20.04
+            arch: X86
+            vulkan: false
+            cuda: true
+          - os: ubuntu-20.04
+            arch: X86
+            vulkan: true
+            cuda: false
     outputs:
       LLVM_PROJECT_COMMIT: ${{ needs.get_llvm_project_commit.outputs.LLVM_PROJECT_COMMIT }}
 
@@ -119,9 +138,11 @@ jobs:
       - name: Compute llvm-project base path and output commit
         shell: bash
         run: |
+          LLVM_INSTALL_DIR_NAME=llvm_install
+          echo "LLVM_INSTALL_DIR_NAME=$LLVM_INSTALL_DIR_NAME" | tee -a $GITHUB_ENV
           echo "LLVM_PROJECT_MAIN_SRC_DIR=${WORKSPACE_ROOT}/llvm-project" | tee -a $GITHUB_ENV
           echo "LLVM_PROJECT_MAIN_BINARY_DIR=${WORKSPACE_ROOT}/build" | tee -a $GITHUB_ENV
-          echo "LLVM_PROJECT_INSTALL_DIR=${WORKSPACE_ROOT}/llvm_project_install" | tee -a $GITHUB_ENV
+          echo "LLVM_PROJECT_INSTALL_DIR=${WORKSPACE_ROOT}/$LLVM_INSTALL_DIR_NAME" | tee -a $GITHUB_ENV
           echo "LLVM_PROJECT_HOST_MAIN_BINARY_DIR=${WORKSPACE_ROOT}/build_host" | tee -a $GITHUB_ENV
           echo "LLVM_PROJECT_COMMIT=${{ needs.get_llvm_project_commit.outputs.LLVM_PROJECT_COMMIT }}" | tee -a $GITHUB_ENV
 
@@ -193,6 +214,90 @@ jobs:
             echo "GENERATOR=Ninja" | tee -a $GITHUB_ENV
           fi
 
+      - name: Install Vulkan
+        if: ${{ matrix.vulkan }}
+        shell: bash
+        run: |
+          cd $WORKSPACE_ROOT
+          
+          if [ x"${{ matrix.os }}" == x"macos-latest" ]; then
+            wget https://sdk.lunarg.com/sdk/download/1.3.239.0/mac/vulkansdk-macos-1.3.239.0.dmg
+            sudo hdiutil attach vulkansdk-macos-1.3.239.0.dmg
+            sudo /Volumes/vulkansdk-macos-1.3.239.0/InstallVulkan.app/Contents/MacOS/InstallVulkan \
+              --accept-licenses \
+              --default-answer \
+              --confirm-command install \
+              com.lunarg.vulkan.core \
+              com.lunarg.vulkan.usr \
+              com.lunarg.vulkan.sdl2 \
+              com.lunarg.vulkan.glm \
+              com.lunarg.vulkan.volk \
+              com.lunarg.vulkan.vma
+          else
+            # compile and install vulkan-headers
+            git clone -b v1.3.239 https://github.com/KhronosGroup/Vulkan-Headers.git
+            mkdir build-vulkan-headers
+            cmake G $GENERATOR \
+              -DCMAKE_CXX_COMPILER=$CXX_COMPILER \
+              -DCMAKE_C_COMPILER=$C_COMPILER \
+              -B build-vulkan-headers \
+              -S Vulkan-Headers
+            sudo cmake --build build-vulkan-headers --target install
+            
+            # compile and install vulkan-loader
+            git clone -b v1.3.239 https://github.com/KhronosGroup/Vulkan-Loader.git
+            mkdir build-vulkan-loader
+            cmake -G $GENERATOR \
+              -DCMAKE_CXX_COMPILER=$CXX_COMPILER \
+              -DCMAKE_C_COMPILER=$C_COMPILER \
+              -DBUILD_WSI_XCB_SUPPORT=0 \
+              -DBUILD_WSI_XLIB_SUPPORT=0 \
+              -DBUILD_WSI_WAYLAND_SUPPORT=0 \
+              -DBUILD_WSI_DIRECTFB_SUPPORT=0 \
+              -DBUILD_WSI_SCREEN_QNX_SUPPORT=0 \
+              -B build-vulkan-loader \
+              -S Vulkan-Loader
+            sudo cmake --build build-vulkan-loader --target install
+          fi
+
+      - name: Install CUDA
+        shell: bash
+        if: ${{ matrix.cuda }}
+        run: |
+          cd $WORKSPACE_ROOT
+          
+          sudo apt install -y kmod
+          wget -q https://developer.download.nvidia.com/compute/cuda/11.7.1/local_installers/cuda_11.7.1_515.65.01_linux.run
+          sudo sh cuda_11.7.1_515.65.01_linux.run --silent
+          if [[ $? -ne 0 ]]; then
+              echo "CUDA Installation Error."
+              exit 1
+          fi
+          
+          CUDA_PATH=/usr/local/cuda
+          echo "CUDA_PATH=${CUDA_PATH}"
+          export CUDA_PATH=${CUDA_PATH}
+          export PATH="$CUDA_PATH/bin:$PATH"
+          export LD_LIBRARY_PATH="$CUDA_PATH/lib:$LD_LIBRARY_PATH"
+          export LD_LIBRARY_PATH="$CUDA_PATH/lib64:$LD_LIBRARY_PATH"
+          
+          # Check nvcc is now available.
+          nvcc -V
+          if [[ $? -ne 0 ]]; then
+              echo "nvcc Installation Error."
+              exit 1
+          fi
+          
+          # If executed on github actions, make the appropriate echo statements to update the environment
+          # Set paths for subsequent steps, using ${CUDA_PATH}
+          echo "Adding CUDA to CUDA_PATH, PATH and LD_LIBRARY_PATH"
+          echo "CUDA_PATH=${CUDA_PATH}" >> $GITHUB_ENV
+          echo "${CUDA_PATH}/bin" >> $GITHUB_PATH
+          echo "LD_LIBRARY_PATH=${CUDA_PATH}/lib:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=${CUDA_PATH}/lib64:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
+          
+          rm -f cuda_11.7.1_515.65.01_linux.run
+
       - name: Build host llvmtblgen/mlirtblgen
         if: ${{ matrix.arch == 'AArch64' }}
         shell: bash
@@ -233,16 +338,41 @@ jobs:
             -DLLVM_DEFAULT_TARGET_TRIPLE=$LLVM_DEFAULT_TARGET_TRIPLE \
             -DLLVM_ENABLE_ASSERTIONS=ON \
             -DLLVM_ENABLE_PROJECTS=mlir \
+            -DLLVM_ENABLE_RTTI=ON \
             -DLLVM_ENABLE_ZSTD=OFF \
             -DLLVM_HOST_TRIPLE=$LLVM_HOST_TRIPLE \
             -DLLVM_INCLUDE_UTILS=ON \
             -DLLVM_INSTALL_UTILS=ON \
-            -DLLVM_TARGETS_TO_BUILD=$ARCH \
             -DLLVM_TARGET_ARCH=$ARCH \
             -DMLIR_BUILD_MLIR_C_DYLIB=1 \
             -DMLIR_ENABLE_BINDINGS_PYTHON=ON \
             -DMLIR_ENABLE_EXECUTION_ENGINE=ON \
+            -DMLIR_ENABLE_SPIRV_CPU_RUNNER=ON \
             -DPython3_EXECUTABLE=$(which python)"
+          
+          LLVM_TARGETS_TO_BUILD=$ARCH
+          
+          if [ x"${{ matrix.cuda }}" == x"true" ]; then
+            CMAKE_CONFIGS="\
+              ${CMAKE_CONFIGS} \
+              -DMLIR_ENABLE_CUDA_RUNNER=ON \
+              -DMLIR_ENABLE_CUDA_CONVERSIONS=ON"
+            LLVM_TARGETS_TO_BUILD="$LLVM_TARGETS_TO_BUILD;NVPTX"
+          fi
+          
+          if [ x"${{ matrix.vulkan }}" == x"true" ]; then
+            if [ x"${{ matrix.os }}" == x"ubuntu-20.04" ]; then
+              VULKAN_LIBRARY=libvulkan.so
+            elif [ x"${{ matrix.os }}" == x"macos-latest" ]; then
+              VULKAN_LIBRARY=libvulkan.dylib
+            fi
+            CMAKE_CONFIGS="\
+              ${CMAKE_CONFIGS} \
+              -DVulkan_LIBRARY=/usr/local/lib/$VULKAN_LIBRARY \
+              -DMLIR_ENABLE_VULKAN_RUNNER=ON"
+          fi
+          
+          CMAKE_CONFIGS="${CMAKE_CONFIGS} -DLLVM_TARGETS_TO_BUILD=$LLVM_TARGETS_TO_BUILD"
           
           echo $CMAKE_CONFIGS
           
@@ -311,8 +441,14 @@ jobs:
             cp -L $LLVM_PROJECT_HOST_MAIN_BINARY_DIR/bin/llvm-tblgen* $LLVM_PROJECT_INSTALL_DIR/llvm_native_tools/llvm-tblgen
           fi
           
-          OUTPUT="llvm-project-${LLVM_PROJECT_COMMIT}-${{ matrix.os }}-${{ matrix.arch }}"
-          XZ_OPT='-T0 -9' tar -cJf "${OUTPUT}.tar.xz" llvm_project_install
+          OUTPUT="llvm-${LLVM_PROJECT_COMMIT}-${{ matrix.os }}-${{ matrix.arch }}"
+          if [ x"${{ matrix.cuda }}" == x"true" ]; then
+            OUTPUT="${OUTPUT}-cuda"
+          fi
+          if [ x"${{ matrix.vulkan }}" == x"true" ]; then
+            OUTPUT="${OUTPUT}-vulkan"
+          fi
+          XZ_OPT='-T0 -9' tar -cJf "${OUTPUT}.tar.xz" $LLVM_INSTALL_DIR_NAME
 
           mkdir -p $GITHUB_WORKSPACE/${{ github.sha }}/
           mv *.tar.xz $GITHUB_WORKSPACE/${{ github.sha }}/
@@ -375,8 +511,8 @@ jobs:
         run: |
           LLVM_PROJECT_COMMIT="${{ needs.build.outputs.LLVM_PROJECT_COMMIT }}"
           echo "Created at $(date) build of [https://github.com/llvm/llvm-project/commit/${LLVM_PROJECT_COMMIT}](https://github.com/llvm/llvm-project/commit/${LLVM_PROJECT_COMMIT})" > body.md
-          echo "tag_name=llvm-project-${LLVM_PROJECT_COMMIT}" | tee -a $GITHUB_OUTPUT
-          echo "release_title=llvm-project-${LLVM_PROJECT_COMMIT}" | tee -a $GITHUB_OUTPUT
+          echo "tag_name=llvm-${LLVM_PROJECT_COMMIT}" | tee -a $GITHUB_OUTPUT
+          echo "release_title=llvm-${LLVM_PROJECT_COMMIT}" | tee -a $GITHUB_OUTPUT
 
       - name: Release current commit
         uses: ncipollo/release-action@v1
