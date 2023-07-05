@@ -63,6 +63,7 @@ jobs:
         py_version: [ "3.11" ]
         cuda: [ true, false ]
         vulkan: [ true, false ]
+        openmp: [ true, false ]
         exclude:
           - os: windows-2019
             arch: AArch64
@@ -70,8 +71,14 @@ jobs:
             cuda: true
           - os: windows-2019
             vulkan: true
+          - os: windows-2019
+            openmp: true
+          - os: macos-latest
+            openmp: false
           - os: macos-latest
             cuda: true
+          - os: ubuntu-20.04
+            openmp: false
           - os: ubuntu-20.04
             arch: AArch64
             cuda: true
@@ -325,30 +332,72 @@ jobs:
           cmake --build ${LLVM_PROJECT_HOST_MAIN_BINARY_DIR} \
             --target llvm-tblgen mlir-tblgen mlir-linalg-ods-yaml-gen mlir-pdll -j 20
 
+      - name: Prevent dependency on Clang for OpenMP (and patch AsyncRuntime)
+        shell: bash
+        if: ${{ matrix.openmp }}
+        run: |
+          if [ x"${{ matrix.os }}" == x"macos-latest" ]; then
+            sed -i.bak 's/construct_check_openmp_target()//g' "$LLVM_PROJECT_MAIN_SRC_DIR/openmp/CMakeLists.txt"
+            sed -i.bak 's/set(ENABLE_CHECK_TARGETS TRUE)//g' "$LLVM_PROJECT_MAIN_SRC_DIR/openmp/cmake/OpenMPTesting.cmake"
+            sed -i.bak 's/extern "C"/extern "C" __attribute__((visibility("default")))/g' "$LLVM_PROJECT_MAIN_SRC_DIR/mlir/lib/ExecutionEngine/AsyncRuntime.cpp"
+          else
+            sed -i 's/construct_check_openmp_target()//g' "$LLVM_PROJECT_MAIN_SRC_DIR/openmp/CMakeLists.txt"
+            sed -i 's/set(ENABLE_CHECK_TARGETS TRUE)//g' "$LLVM_PROJECT_MAIN_SRC_DIR/openmp/cmake/OpenMPTesting.cmake"
+            sed -i 's/extern "C"/extern "C" __attribute__((visibility("default")))/g' "$LLVM_PROJECT_MAIN_SRC_DIR/mlir/lib/ExecutionEngine/AsyncRuntime.cpp"
+          fi
+
       - name: Configure CMake
         shell: bash
         run: |
           cd $WORKSPACE_ROOT
+          LLVM_ENABLE_PROJECTS="llvm;mlir"
+          if [ x"${{ matrix.openmp }}" == x"true" ]; then
+            LLVM_ENABLE_PROJECTS="$LLVM_ENABLE_PROJECTS;openmp"
+          fi
           CMAKE_CONFIGS="\
+            -DBUILD_SHARED_LIBS=OFF \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CXX_COMPILER=$CXX_COMPILER \
             -DCMAKE_C_COMPILER=$C_COMPILER \
             -DCMAKE_INSTALL_PREFIX=$LLVM_PROJECT_INSTALL_DIR \
+            \
+            -DLLVM_BUILD_BENCHMARKS=OFF \
+            -DLLVM_BUILD_EXAMPLES=OFF \
+            -DLLVM_BUILD_RUNTIMES=OFF \
+            -DLLVM_BUILD_TESTS=OFF \
+            -DLLVM_BUILD_TOOLS=ON \
+            -DLLVM_BUILD_UTILS=ON \
             -DLLVM_CCACHE_BUILD=ON \
             -DLLVM_DEFAULT_TARGET_TRIPLE=$LLVM_DEFAULT_TARGET_TRIPLE \
             -DLLVM_ENABLE_ASSERTIONS=ON \
-            -DLLVM_ENABLE_PROJECTS=mlir \
+            -DLLVM_ENABLE_PROJECTS=$LLVM_ENABLE_PROJECTS \
             -DLLVM_ENABLE_RTTI=ON \
             -DLLVM_ENABLE_ZSTD=OFF \
             -DLLVM_HOST_TRIPLE=$LLVM_HOST_TRIPLE \
+            -DLLVM_INCLUDE_BENCHMARKS=OFF \
+            -DLLVM_INCLUDE_EXAMPLES=OFF \
+            -DLLVM_INCLUDE_RUNTIMES=OFF \
+            -DLLVM_INCLUDE_TESTS=OFF \
+            -DLLVM_INCLUDE_TOOLS=ON \
             -DLLVM_INCLUDE_UTILS=ON \
             -DLLVM_INSTALL_UTILS=ON \
             -DLLVM_TARGET_ARCH=$ARCH \
+            \
             -DMLIR_BUILD_MLIR_C_DYLIB=1 \
             -DMLIR_ENABLE_BINDINGS_PYTHON=ON \
             -DMLIR_ENABLE_EXECUTION_ENGINE=ON \
             -DMLIR_ENABLE_SPIRV_CPU_RUNNER=ON \
+            \
             -DPython3_EXECUTABLE=$(which python)"
+          
+          if [ x"${{ matrix.openmp }}" == x"true" ]; then
+            CMAKE_CONFIGS="\
+            ${CMAKE_CONFIGS}
+            -DENABLE_CHECK_TARGETS=OFF \
+            -DLIBOMP_OMPD_GDB_SUPPORT=OFF \
+            -DLIBOMP_USE_QUAD_PRECISION=False \
+            -DOPENMP_ENABLE_LIBOMPTARGET=OFF"
+          fi
           
           LLVM_TARGETS_TO_BUILD=$ARCH
           
@@ -421,6 +470,21 @@ jobs:
           
           fi
 
+      - name: Install StrawberryPerl on Windows
+        if: ${{ matrix.os == 'windows-2019' && matrix.openmp }}
+        shell: bash
+        run: |
+          rm -rf "C:\Program Files\Git\usr\bin\perl.exe"
+          choco install -y strawberryperl --force
+          echo "PERL5LIB=/c/Strawberry/perl/vendor/lib:/c/Strawberry/perl/site/lib" | tee -a $GITHUB_ENV
+          export PATH=/c/Strawberry/perl/bin:$PATH
+          ln -s /c/Strawberry/perl/bin/perl "C:\Program Files\Git\usr\bin\perl.exe"
+          echo "PATH=$PATH" | tee -a $GITHUB_ENV
+          cpan -i Pod::Usage
+          cpan -i Pod::Text
+          cpan -i Pod::Simple
+          cpan -i Pod::Usage
+
       - name: Build distro
         shell: bash
         run: |
@@ -447,6 +511,9 @@ jobs:
           fi
           if [ x"${{ matrix.vulkan }}" == x"true" ]; then
             OUTPUT="${OUTPUT}-vulkan"
+          fi
+          if [ x"${{ matrix.openmp }}" == x"true" ]; then
+            OUTPUT="${OUTPUT}-openmp"
           fi
           XZ_OPT='-T0 -9' tar -cJf "${OUTPUT}.tar.xz" $LLVM_INSTALL_DIR_NAME
 
