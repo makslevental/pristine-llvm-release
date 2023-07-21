@@ -99,6 +99,17 @@ jobs:
         with:
           python-version: ${{ matrix.py_version }}
 
+      - name: Free disk space
+        if: contains(matrix.os, 'ubuntu')
+        uses: jlumbroso/free-disk-space@76866dbe54312617f00798d1762df7f43def6e5c # v1.2.0
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: false # This frees space on the wrong partition.
+          tool-cache: false # This includes Python, which we need.
+
       - uses: ilammy/msvc-dev-cmd@v1.4.1
 
 # chocolatey vswhere
