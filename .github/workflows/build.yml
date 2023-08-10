@@ -285,7 +285,7 @@ jobs:
           cd $WORKSPACE_ROOT
           
           sudo apt install -y kmod
-          wget -q https://developer.download.nvidia.com/compute/cuda/11.7.1/local_installers/cuda_11.7.1_515.65.01_linux.run
+          wget -q https://developer.download.nvidia.com/compute/cuda/12.2.0/local_installers/cuda_12.2.0_535.54.03_linux.run
           sudo sh cuda_11.7.1_515.65.01_linux.run --silent
           if [[ $? -ne 0 ]]; then
               echo "CUDA Installation Error."
@@ -314,7 +314,7 @@ jobs:
           echo "LD_LIBRARY_PATH=${CUDA_PATH}/lib:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
           echo "LD_LIBRARY_PATH=${CUDA_PATH}/lib64:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
           
-          rm -f cuda_11.7.1_515.65.01_linux.run
+          rm -f cuda_12.2.0_535.54.03_linux.run
 
       - name: Build host llvmtblgen/mlirtblgen
         if: ${{ matrix.arch == 'AArch64' }}
