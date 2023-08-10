@@ -53,62 +53,75 @@ jobs:
 
     name: Build distro of MLIR
     #    runs-on: ${{ (matrix.os == 'windows-2019' && 'self-hosted') || matrix.os }}
-    runs-on: ${{ matrix.os }}
     continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
-        os: [ ubuntu-20.04, macos-latest, windows-2019 ]
-        arch: [ AArch64, X86 ]
-        py_version: [ "3.11" ]
-        cuda: [ true, false ]
-        vulkan: [ true, false ]
-        openmp: [ true, false ]
-        exclude:
+        include:
           - os: windows-2019
-            arch: AArch64
-          - os: windows-2019
-            cuda: true
-          - os: windows-2019
-            vulkan: true
-          - os: windows-2019
+            arch: X86
+
+          - os: macos-latest
+            arch: X86
+          - os: macos-latest
+            arch: X86
             openmp: true
           - os: macos-latest
-            openmp: false
-          - os: macos-latest
-            cuda: true
-          - os: ubuntu-20.04
-            openmp: false
-          - os: ubuntu-20.04
-            arch: AArch64
-            cuda: true
-          - os: ubuntu-20.04
-            arch: X86
-            vulkan: false
-            cuda: true
-          - os: ubuntu-20.04
             arch: X86
             vulkan: true
-            cuda: false
+
+          - os: macos-latest
+            arch: AArch64
+          - os: macos-latest
+            arch: AArch64
+            openmp: true
+          - os: macos-latest
+            arch: AArch64
+            vulkan: true
+
+          - os: ubuntu-20.04
+            arch: X86
+            container: quay.io/pypa/manylinux2014_x86_64
+          - os: ubuntu-20.04
+            arch: X86
+            container: quay.io/pypa/manylinux2014_x86_64
+            openmp: true
+          - os: ubuntu-20.04
+            arch: X86
+            container: quay.io/pypa/manylinux2014_x86_64
+            vulkan: true
+          - os: ubuntu-20.04
+            arch: X86
+            container: quay.io/pypa/manylinux2014_x86_64
+            cuda: true
+
+          - os: ubuntu-20.04
+            arch: AArch64
+            container: dockcross/manylinux2014-aarch64:20230809-85db345
+          - os: ubuntu-20.04
+            arch: AArch64
+            container: dockcross/manylinux2014-aarch64:20230809-85db345
+            openmp: true
+          - os: ubuntu-20.04
+            arch: AArch64
+            container: dockcross/manylinux2014-aarch64:20230809-85db345
+            vulkan: true
+          - os: ubuntu-20.04
+            arch: AArch64
+            container: dockcross/manylinux2014-aarch64:20230809-85db345
+            cuda: true
+
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
     outputs:
       LLVM_PROJECT_COMMIT: ${{ needs.get_llvm_project_commit.outputs.LLVM_PROJECT_COMMIT }}
 
     steps:
       - name: Set up Python
+        if: ${{ matrix.os != 'ubuntu-20.04' }}
         uses: actions/setup-python@13ae5bb136fac2878aff31522b9efb785519f984 # v4.3.0
         with:
-          python-version: ${{ matrix.py_version }}
-
-      - name: Free disk space
-        if: contains(matrix.os, 'ubuntu')
-        uses: jlumbroso/free-disk-space@76866dbe54312617f00798d1762df7f43def6e5c # v1.2.0
-        with:
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          swap-storage: false # This frees space on the wrong partition.
-          tool-cache: false # This includes Python, which we need.
+          python-version: "3.10"
 
       - uses: ilammy/msvc-dev-cmd@v1.4.1
 
@@ -164,13 +177,25 @@ jobs:
           echo "LLVM_PROJECT_HOST_MAIN_BINARY_DIR=${WORKSPACE_ROOT}/build_host" | tee -a $GITHUB_ENV
           echo "LLVM_PROJECT_COMMIT=${{ needs.get_llvm_project_commit.outputs.LLVM_PROJECT_COMMIT }}" | tee -a $GITHUB_ENV
 
+      - name: Set up Python ubuntu
+        if: ${{ matrix.os == 'ubuntu-20.04' }}
+        run: |
+          /opt/python/cp310-cp310/bin/python -m pip install -r ${LLVM_PROJECT_MAIN_SRC_DIR}/mlir/python/requirements.txt
+
       - name: Install Python depends
+        if: ${{ matrix.os != 'ubuntu-20.04' }}
         shell: bash
         run: |
           python -m pip install -r ${LLVM_PROJECT_MAIN_SRC_DIR}/mlir/python/requirements.txt
 
       - name: Install Ninja
+        if: ${{ matrix.os != 'ubuntu-20.04' }}
         uses: llvm/actions/install-ninja@6a57890d0e3f9f35dfc72e7e48bc5e1e527cdd6c # Jan 17
+
+      - name: Install Ninja
+        if: ${{ matrix.os == 'ubuntu-20.04' }}
+        run: |
+          yum install -y ninja-build
 
       - name: Ccache for C++ compilation
         uses: hendrikmuhs/ccache-action@621a41397ed83711c72862638d9ff6e63fca3041 # v1.2.3
@@ -178,13 +203,15 @@ jobs:
           key: ${{ matrix.os }}-${{ matrix.arch }}-llvm-project
           # LLVM needs serious cache size
           max-size: 6G
+          variant: sccache
 
       - name: Install cross-compilation toolchain
         if: ${{ matrix.os == 'ubuntu-20.04' && matrix.arch == 'AArch64' }}
         run: |
-          sudo apt-get update
-          sudo apt-get install -y binutils-aarch64-linux-gnu \
-            g++-aarch64-linux-gnu gcc-aarch64-linux-gnu
+          yum -y update \
+          && yum -y install epel-release \
+          && yum -y install clang gcc gcc-c++ make wget \
+          && yum -y install gcc-aarch64-linux-gnu gcc-c++-aarch64-linux-gnu cross-binutils-common cross-gcc-common
 
       - name: Choose compiler and set env vars
         shell: bash
@@ -216,10 +243,11 @@ jobs:
             echo "EXTRA=-A x64" | tee -a $GITHUB_ENV
           elif [ x"${{ matrix.os }}" == x"ubuntu-20.04" ] && [ x"${{ matrix.arch }}" == x"AArch64" ]; then
             echo "ARCH=AArch64" | tee -a $GITHUB_ENV
-            echo "CXX_COMPILER=aarch64-linux-gnu-g++" | tee -a $GITHUB_ENV
-            echo "C_COMPILER=aarch64-linux-gnu-gcc" | tee -a $GITHUB_ENV
-            echo "LLVM_DEFAULT_TARGET_TRIPLE=aarch64-linux-gnu" | tee -a $GITHUB_ENV
-            echo "LLVM_HOST_TRIPLE=aarch64-linux-gnu" | tee -a $GITHUB_ENV
+            echo "CXX_COMPILER=aarch64-unknown-linux-gnu-g++" | tee -a $GITHUB_ENV
+            echo "C_COMPILER=aarch64-unknown-linux-gnu-gcc" | tee -a $GITHUB_ENV
+            echo "LLVM_DEFAULT_TARGET_TRIPLE=aarch64-unknown-linux-gnu" | tee -a $GITHUB_ENV
+            echo "LLVM_HOST_TRIPLE=aarch64-unknown-linux-gnu" | tee -a $GITHUB_ENV
+            echo "CMAKE_EXE_LINKER_FLAGS=-static-libgcc -static-libstdc++" | tee -a $GITHUB_ENV
             echo "STATIC_FLAGS=-static-libgcc -static-libstdc++" | tee -a $GITHUB_ENV
             echo "GENERATOR=Ninja" | tee -a $GITHUB_ENV
           else
@@ -228,7 +256,6 @@ jobs:
             echo "C_COMPILER=gcc" | tee -a $GITHUB_ENV
             echo "LLVM_DEFAULT_TARGET_TRIPLE=x86_64-unknown-linux-gnu" | tee -a $GITHUB_ENV
             echo "LLVM_HOST_TRIPLE=x86_64-unknown-linux-gnu" | tee -a $GITHUB_ENV
-            echo "STATIC_FLAGS=-static-libgcc -static-libstdc++" | tee -a $GITHUB_ENV
             echo "GENERATOR=Ninja" | tee -a $GITHUB_ENV
           fi
 
@@ -285,8 +312,8 @@ jobs:
           cd $WORKSPACE_ROOT
           
           sudo apt install -y kmod
-          wget -q https://developer.download.nvidia.com/compute/cuda/11.7.1/local_installers/cuda_11.7.1_515.65.01_linux.run
-          sudo sh cuda_11.7.1_515.65.01_linux.run --silent
+          wget -q https://developer.download.nvidia.com/compute/cuda/12.2.0/local_installers/cuda_12.2.0_535.54.03_linux.run
+          sudo sh cuda_12.2.0_535.54.03_linux.run --silent
           if [[ $? -ne 0 ]]; then
               echo "CUDA Installation Error."
               exit 1
@@ -314,17 +341,35 @@ jobs:
           echo "LD_LIBRARY_PATH=${CUDA_PATH}/lib:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
           echo "LD_LIBRARY_PATH=${CUDA_PATH}/lib64:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
           
-          rm -f cuda_11.7.1_515.65.01_linux.run
+          rm -f cuda_12.2.0_535.54.03_linux.run
 
       - name: Build host llvmtblgen/mlirtblgen
         if: ${{ matrix.arch == 'AArch64' }}
         shell: bash
         run: |
           cd $WORKSPACE_ROOT
-          if [ x"${{ matrix.os }}" == x"ubuntu-20.04" ]; then
+          
+          if [ x"${{ matrix.os }}" == x"ubuntu-20.04" ] && [ x"${{ matrix.arch }}" == x"AArch64" ]; then
             export CXX_COMPILER=g++
             export C_COMPILER=gcc
+            export AS=
+            export AR=
+            export CMAKE_TOOLCHAIN_FILE=
+            export CPP=
+            export PATH=/opt/rh/devtoolset-10/root/usr/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+            export LD=
+            export STRIP=
+            export CROSS_TRIPLE=
+            export CXX=
+            export OBJCOPY=
+            export FC=
+            export PKG_CONFIG_PATH=
+            export CROSS_ROOT=
+            export ARCH=
+            export CC=
+            export CROSS_COMPILE=
           fi
+          
           cmake \
             -G "$GENERATOR" \
             -DBUILD_SHARED_LIBS=OFF \
@@ -361,6 +406,12 @@ jobs:
         shell: bash
         run: |
           cd $WORKSPACE_ROOT
+          if [ x"${{ matrix.os }}" == x"ubuntu-20.04" ]; then
+            PYTHON3=/opt/python/cp310-cp310/bin/python
+          else
+            PYTHON3=python3
+          fi
+          
           LLVM_ENABLE_PROJECTS="llvm;mlir"
           if [ x"${{ matrix.openmp }}" == x"true" ]; then
             LLVM_ENABLE_PROJECTS="$LLVM_ENABLE_PROJECTS;openmp"
@@ -378,7 +429,8 @@ jobs:
             -DLLVM_BUILD_TESTS=OFF \
             -DLLVM_BUILD_TOOLS=ON \
             -DLLVM_BUILD_UTILS=ON \
-            -DLLVM_CCACHE_BUILD=ON \
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
             -DLLVM_DEFAULT_TARGET_TRIPLE=$LLVM_DEFAULT_TARGET_TRIPLE \
             -DLLVM_ENABLE_ASSERTIONS=ON \
             -DLLVM_ENABLE_PROJECTS=$LLVM_ENABLE_PROJECTS \
@@ -399,7 +451,7 @@ jobs:
             -DMLIR_ENABLE_EXECUTION_ENGINE=ON \
             -DMLIR_ENABLE_SPIRV_CPU_RUNNER=ON \
             \
-            -DPython3_EXECUTABLE=$(which python)"
+            -DPython3_EXECUTABLE=$(which $PYTHON3)"
           
           if [ x"${{ matrix.openmp }}" == x"true" ]; then
             CMAKE_CONFIGS="\
@@ -457,6 +509,7 @@ jobs:
                 -DMLIR_PDLL_TABLEGEN=$LLVM_PROJECT_HOST_MAIN_BINARY_DIR/bin/mlir-pdll \
                 -DMLIR_TABLEGEN=$LLVM_PROJECT_HOST_MAIN_BINARY_DIR/bin/mlir-tblgen \
                 -DCMAKE_CXX_FLAGS="-O2 ${STATIC_FLAGS}" \
+                -DCMAKE_EXE_LINKER_FLAGS=$CMAKE_EXE_LINKER_FLAGS \
                 -S${LLVM_PROJECT_MAIN_SRC_DIR}/llvm \
                 -B${LLVM_PROJECT_MAIN_BINARY_DIR}
           
@@ -501,7 +554,6 @@ jobs:
         run: |
           cd $WORKSPACE_ROOT
           cmake --build ${LLVM_PROJECT_MAIN_BINARY_DIR} --target install -j
-          ccache -s
 
       - name: Make tarballs
         shell: bash
@@ -535,31 +587,6 @@ jobs:
         uses: actions/checkout@v3
         with:
           path: this_repo
-
-      - name: Build MLIR Python bindings wheel
-        shell: bash
-        run: |
-          cd $GITHUB_WORKSPACE/this_repo
-          
-          python -m pip install wheel
-          if [ x"${{ matrix.os }}" == x"macos-latest" ]; then
-            PLATFORM_NAME="macosx_12_0"
-            ARCH=$CMAKE_OSX_ARCHITECTURE
-          elif [ x"${{ matrix.os }}" == x"windows-2019" ]; then
-            PLATFORM_NAME="win"
-            ARCH=amd64
-          elif [ x"${{ matrix.os }}" == x"ubuntu-20.04" ] && [ x"${{ matrix.arch }}" == x"AArch64" ]; then
-            PLATFORM_NAME="manylinux2014"
-            ARCH=aarch64
-          else
-            PLATFORM_NAME="manylinux2014"
-            ARCH=x86_64
-          fi
-          
-          cp -L -R $LLVM_PROJECT_INSTALL_DIR/python_packages/mlir_core/mlir .
-          cp -L -R $LLVM_PROJECT_INSTALL_DIR/lib/*mlir* mlir/_mlir_libs/
-          
-          python setup.py bdist_wheel --plat-name "${PLATFORM_NAME}_${ARCH}" --dist-dir $GITHUB_WORKSPACE/${{ github.sha }}
 
       - name: Upload an artifact
         uses: actions/upload-artifact@v3
@@ -595,7 +622,7 @@ jobs:
       - name: Release current commit
         uses: ncipollo/release-action@v1
         with:
-          artifacts: "${{ github.sha }}/*.tar.xz,${{ github.sha }}/*.whl,${{ github.sha }}/*.exe"
+          artifacts: "${{ github.sha }}/*.tar.xz,${{ github.sha }}/*.exe"
           bodyFile: body.md
           token: "${{ secrets.GITHUB_TOKEN }}"
           tag: "${{ steps.setup_release.outputs.tag_name }}"
